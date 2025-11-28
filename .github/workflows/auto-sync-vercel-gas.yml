@@ -1,52 +1,42 @@
-name: Sync GAS URL to Vercel
+name: Auto Sync GAS URL to Vercel
 
 on:
   push:
     paths:
-      - 'config/gas_url.txt'   # ubah path jika kamu pakai file lain
-      - '.github/workflows/auto-sync-vercel-gas.yml'  # optional: redeploy when workflow updated
+      - 'config/gas_url.txt'
 
 jobs:
-  sync-gas:
+  sync:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    env:
-      # Nama secret untuk dipakai di steps. Lihat bagian "Setup secrets" di bawah.
-      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-      VERCEL_PROJECT: ${{ secrets.VERCEL_PROJECT }}  # project id atau project name (prj_xxx or my-project)
-      VERCEL_DEPLOY_HOOK: ${{ secrets.VERCEL_DEPLOY_HOOK }} # optional
-
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Read GAS URL from file
+      - name: Read GAS_URL
         id: read_gas
         run: |
           if [ ! -f config/gas_url.txt ]; then
-            echo "File config/gas_url.txt not found"
+            echo "File config/gas_url.txt not found" >&2
             exit 1
           fi
-          # trim whitespace/newline
-          GAS_URL=$(cat config/gas_url.txt | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-          if [ -z "$GAS_URL" ]; then
-            echo "GAS_URL is empty"
+          GAS=$(cat config/gas_url.txt | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          if [ -z "$GAS" ]; then
+            echo "GAS_URL is empty" >&2
             exit 1
           fi
-          echo "gas_url=$GAS_URL" >> $GITHUB_OUTPUT
+          echo "gas_url=$GAS" >> $GITHUB_OUTPUT
 
-      - name: Upsert GAS_URL to Vercel (via REST API)
+      - name: Upsert GAS_URL into Vercel (upsert=true)
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_PROJECT: ${{ secrets.VERCEL_PROJECT }}
         run: |
           set -e
+          # If you prefer to use secret for project id, set secrets.VERCEL_PROJECT; otherwise we use the provided project id below
+          PROJECT_ID="${{ secrets.VERCEL_PROJECT || 'prj_O1afEEeDqFf1QkVUc4WMBbhGOINV' }}"
           GAS_URL="${{ steps.read_gas.outputs.gas_url }}"
-          echo "Updating VERCEL env var GAS_URL -> $GAS_URL (project: $VERCEL_PROJECT)"
 
-          # build request body (single env var). type: plain (or secret/encrypted if needed)
+          echo "Updating Vercel project $PROJECT_ID with GAS_URL=$GAS_URL"
+
           read -r -d '' PAYLOAD <<EOF || true
 [{
   "key": "GAS_URL",
@@ -56,9 +46,7 @@ jobs:
 }]
 EOF
 
-          # call Vercel API: upsert=true to overwrite if exists
-          API="https://api.vercel.com/v10/projects/${VERCEL_PROJECT}/env?upsert=true"
-          echo "Calling $API"
+          API="https://api.vercel.com/v10/projects/${PROJECT_ID}/env?upsert=true"
           HTTP_STATUS=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
             -X POST "$API" \
             -H "Authorization: Bearer $VERCEL_TOKEN" \
@@ -68,15 +56,13 @@ EOF
           echo "Vercel API status: $HTTP_STATUS"
           cat /tmp/resp.json
           if [ "$HTTP_STATUS" -ge 400 ]; then
-            echo "Failed to update env var (status $HTTP_STATUS)"
+            echo "Failed to update env var (status $HTTP_STATUS)" >&2
             exit 1
           fi
 
-      - name: Trigger Vercel Deploy Hook (optional)
+      - name: Trigger Deploy Hook (optional)
         if: secrets.VERCEL_DEPLOY_HOOK != ''
-        env:
-          HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK }}
         run: |
           echo "Triggering deploy hook..."
-          curl -s -X POST "$HOOK_URL" || true
-          echo "Deploy hook triggered (no further checks)."
+          curl -s -X POST "${{ secrets.VERCEL_DEPLOY_HOOK }}" || true
+          echo "Deploy hook called."
