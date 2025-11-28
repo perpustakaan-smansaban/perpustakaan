@@ -1,0 +1,82 @@
+name: Sync GAS URL to Vercel
+
+on:
+  push:
+    paths:
+      - 'config/gas_url.txt'   # ubah path jika kamu pakai file lain
+      - '.github/workflows/auto-sync-vercel-gas.yml'  # optional: redeploy when workflow updated
+
+jobs:
+  sync-gas:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    env:
+      # Nama secret untuk dipakai di steps. Lihat bagian "Setup secrets" di bawah.
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_PROJECT: ${{ secrets.VERCEL_PROJECT }}  # project id atau project name (prj_xxx or my-project)
+      VERCEL_DEPLOY_HOOK: ${{ secrets.VERCEL_DEPLOY_HOOK }} # optional
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read GAS URL from file
+        id: read_gas
+        run: |
+          if [ ! -f config/gas_url.txt ]; then
+            echo "File config/gas_url.txt not found"
+            exit 1
+          fi
+          # trim whitespace/newline
+          GAS_URL=$(cat config/gas_url.txt | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          if [ -z "$GAS_URL" ]; then
+            echo "GAS_URL is empty"
+            exit 1
+          fi
+          echo "gas_url=$GAS_URL" >> $GITHUB_OUTPUT
+
+      - name: Upsert GAS_URL to Vercel (via REST API)
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT: ${{ secrets.VERCEL_PROJECT }}
+        run: |
+          set -e
+          GAS_URL="${{ steps.read_gas.outputs.gas_url }}"
+          echo "Updating VERCEL env var GAS_URL -> $GAS_URL (project: $VERCEL_PROJECT)"
+
+          # build request body (single env var). type: plain (or secret/encrypted if needed)
+          read -r -d '' PAYLOAD <<EOF || true
+[{
+  "key": "GAS_URL",
+  "value": "$GAS_URL",
+  "type": "plain",
+  "target": ["preview","production"]
+}]
+EOF
+
+          # call Vercel API: upsert=true to overwrite if exists
+          API="https://api.vercel.com/v10/projects/${VERCEL_PROJECT}/env?upsert=true"
+          echo "Calling $API"
+          HTTP_STATUS=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
+            -X POST "$API" \
+            -H "Authorization: Bearer $VERCEL_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+
+          echo "Vercel API status: $HTTP_STATUS"
+          cat /tmp/resp.json
+          if [ "$HTTP_STATUS" -ge 400 ]; then
+            echo "Failed to update env var (status $HTTP_STATUS)"
+            exit 1
+          fi
+
+      - name: Trigger Vercel Deploy Hook (optional)
+        if: secrets.VERCEL_DEPLOY_HOOK != ''
+        env:
+          HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK }}
+        run: |
+          echo "Triggering deploy hook..."
+          curl -s -X POST "$HOOK_URL" || true
+          echo "Deploy hook triggered (no further checks)."
